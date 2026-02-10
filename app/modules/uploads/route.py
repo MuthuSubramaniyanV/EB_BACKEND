@@ -1,8 +1,9 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, UploadFile, File
+from .service import MeterService
+from .schema import MeterReadingResponse
 
 router = APIRouter()
 
-# TODO: Implement upload routes
-# - POST / (ESP32 uploads meter image)
-# - GET /{upload_id}
-# - GET / (list uploads)
+@router.post("/upload", response_model=MeterReadingResponse)
+async def upload_image(file: UploadFile = File(...)):
+    return await MeterService.process_meter_upload(file)

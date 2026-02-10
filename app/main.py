@@ -23,11 +23,11 @@ def health():
     return {"ok": True}
 
 
-app.include_router(auth_router, prefix="/auth", tags=["auth"])
-app.include_router(users_router, prefix="/users", tags=["users"])
-app.include_router(consumers_router, prefix="/consumers", tags=["consumers"])
-app.include_router(devices_router, prefix="/devices", tags=["devices"])
-app.include_router(uploads_router, prefix="/uploads", tags=["uploads"])
-app.include_router(readings_router, prefix="/readings", tags=["readings"])
-app.include_router(billing_router, prefix="/billing", tags=["billing"])
-app.include_router(admin_router, prefix="/admin", tags=["admin"])
+app.include_router(auth_router, tags=["auth"])
+app.include_router(users_router,  tags=["users"])
+app.include_router(consumers_router, tags=["consumers"])
+app.include_router(devices_router,  tags=["devices"])
+app.include_router(uploads_router, tags=["uploads"])
+app.include_router(readings_router,  tags=["readings"])
+app.include_router(billing_router,  tags=["billing"])
+app.include_router(admin_router,  tags=["admin"])
