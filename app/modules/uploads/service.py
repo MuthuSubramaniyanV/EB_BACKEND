@@ -1,46 +1,39 @@
 import uuid
 from datetime import datetime, timezone
 from fastapi import HTTPException
-from .repository import FilebaseRepository
-
-repo = FilebaseRepository()
+from sqlmodel import Session
+from app.modules.uploads.model import MeterUpload
+from app.modules.uploads.repository import UploadRepository, filebase
 
 MAX_FILE_SIZE = 5 * 1024 * 1024
-ALLOWED_CONTENT_TYPES = {"image/jpeg", "image/png"}
+ALLOWED_CONTENT_TYPES = {"image/jpeg", "image/png", "image/jpg"}
 
 
-class MeterService:
+class UploadService:
     @staticmethod
-    async def process_meter_upload(file):
+    async def process_meter_upload(session: Session, file, user_id: int) -> MeterUpload:
         content = await file.read()
 
         if file.content_type not in ALLOWED_CONTENT_TYPES:
-            raise HTTPException(400, "Unsupported file type")
+            raise HTTPException(status_code=400, detail="Unsupported file type")
 
         if len(content) > MAX_FILE_SIZE:
-            raise HTTPException(400, "File too large")
+            raise HTTPException(status_code=400, detail="File too large")
 
         ext = "jpg" if file.content_type == "image/jpeg" else "png"
         file_name = f"meter_{uuid.uuid4()}.{ext}"
+        image_url = filebase.upload_image(content, file_name, file.content_type)
 
-        image_url = repo.upload_file(
-            content,
-            file_name,
-            file.content_type,
-        )
-
-        timestamp = datetime.now(timezone.utc)
-
-        saved = repo.save_metadata_to_db(
+        upload = MeterUpload(
+            user_id=user_id,
             file_name=file_name,
             image_url=image_url,
-            timestamp=timestamp,
+            timestamp=datetime.now(timezone.utc),
             status="pending_ocr",
         )
+        return UploadRepository.save(session, upload)
 
-        return {
-            "id": saved.id,
-            "image_url": saved.image_url,
-            "timestamp": saved.timestamp,
-            "status": saved.status,
-        }
+    @staticmethod
+    def delete_upload(session: Session, upload: MeterUpload) -> None:
+        filebase.delete_image(upload.file_name)
+        UploadRepository.delete(session, upload)

@@ -25,5 +25,11 @@ class Settings:
     R2_BUCKET = env("R2_BUCKET")
     R2_PUBLIC_BASE_URL = env("R2_PUBLIC_BASE_URL")  # if bucket is public
 
+    FILEBASE_ENDPOINT = env("FILEBASE_ENDPOINT")
+    FILEBASE_KEY = env("FILEBASE_KEY")
+    FILEBASE_SECRET = env("FILEBASE_SECRET")
+    FILEBASE_BUCKET = env("FILEBASE_BUCKET")
+    FILEBASE_PUBLIC_BASE_URL = env("FILEBASE_PUBLIC_BASE_URL")
+
 
 settings = Settings()
