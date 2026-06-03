@@ -8,7 +8,7 @@ Backend for KSEB Meter Reading Automation: ESP32-CAM uploads meter images → ba
  Health endpoint  
  Swagger API docs (`/docs`)  
  Upload endpoint (ESP32 → API)  
- Store images to Cloudflare R2  
+ Store images to  
 Save metadata to Supabase PostgreSQL  
 OCR (crop ROI + digit extraction)  
  Admin approve/correct/reject + audit log  
@@ -45,11 +45,4 @@ python.exe -m pip install --upgrade pip
 ## TO RUN THE PROJECT 
 run_project.bat
 
-## TO TEST THE PROJECT
-run_project.bat test
 
-## TO FIX THE PROJECT
-run_project.bat fmt
-
-## TO QUALITY CHECK 
-run_project.bat check

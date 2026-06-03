@@ -24,6 +24,7 @@ const seed = {
     paymentStatus: "Pending",
     approved: false,
   },
+  bills: [],
   captures: [
     ["06:30 AM", "13112.5 kWh", "Sharp image", "ok"],
     ["08:15 AM", "13116.0 kWh", "Best OCR confidence", "ok"],
@@ -54,6 +55,149 @@ async function loadState() {
   return normalizeState(saved ? JSON.parse(saved) : structuredClone(seed));
 }
 
+function _authHeaders() {
+  const token = window.localStorage.getItem("meterx_auth_token");
+  const headers = { "Content-Type": "application/json" };
+  if (token) headers.Authorization = `Bearer ${token}`;
+  return headers;
+}
+
+async function refreshBackendData() {
+  const token = window.localStorage.getItem("meterx_auth_token");
+  if (!token) return;
+
+  try {
+    const headers = { ..._authHeaders() };
+    const profileRes = await fetch((window.__API_BASE__ || "") + "/auth/me", { headers });
+    if (!profileRes.ok) {
+      throw new Error("Unable to verify session");
+    }
+
+    const profile = await profileRes.json();
+    const currentUser = state.users.find((item) => String(item.id) === String(profile.id));
+    if (!currentUser) {
+      state.users.push(profile);
+    }
+
+    state.currentUserId = profile.id;
+    state.route = profile.role === "admin" ? "admin-dashboard" : "consumer-dashboard";
+    if (profile.role === "consumer") {
+      state.selectedConsumerId = profile.id;
+    }
+
+    if (profile.role === "admin") {
+      const usersRes = await fetch((window.__API_BASE__ || "") + "/users", { headers });
+      if (usersRes.ok) {
+        const users = await usersRes.json();
+        state.users = users.map((user) => ({ ...user }));
+        const firstConsumer = state.users.find((user) => user.role === "consumer");
+        if (firstConsumer && !state.selectedConsumerId) {
+          state.selectedConsumerId = firstConsumer.id;
+        }
+      }
+    }
+
+    const readingsRes = await fetch((window.__API_BASE__ || "") + "/readings", { headers });
+    if (readingsRes.ok) {
+      state.readings = await readingsRes.json();
+    }
+
+    const billsRes = await fetch((window.__API_BASE__ || "") + "/bills", { headers });
+    if (billsRes.ok) {
+      state.bills = await billsRes.json();
+    }
+
+    saveState();
+  } catch (e) {
+    // keep local fallback state if backend data unavailable
+  }
+}
+
+async function handleAddConsumer() {
+  const name = prompt("Consumer full name:");
+  if (!name) return;
+  const email = prompt("Consumer email:", "");
+  if (!email) return;
+  const password = prompt("Temporary password:", "1234");
+  if (!password) return;
+  const consumer_number = prompt("Consumer number (unique):");
+  if (!consumer_number) return;
+
+  const payload = {
+    name,
+    email,
+    password,
+    role: "consumer",
+    consumer_number,
+  };
+
+  try {
+    const res = await fetch((window.__API_BASE__ || "") + "/auth/register", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ..._authHeaders() },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) throw new Error("Create failed");
+
+    const user = await res.json();
+    if (!state.users.find((item) => String(item.id) === String(user.id))) {
+      state.users.push(user);
+    }
+    saveState();
+    showToast("Consumer created");
+    render();
+  } catch (e) {
+    showToast("Failed to create consumer");
+  }
+}
+
+async function handleEditConsumer(id) {
+  const user = state.users.find((u) => String(u.id) === String(id));
+  if (!user) return;
+  const name = prompt("Edit name:", user.name);
+  if (name === null) return;
+  const consumer_number = prompt("Edit consumer number:", user.consumer_number || "");
+  if (consumer_number === null) return;
+
+  const payload = { name, consumer_number };
+
+  try {
+    const res = await fetch((window.__API_BASE__ || "") + `/users/${user.id}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", ..._authHeaders() },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) throw new Error("Update failed");
+    const updated = await res.json();
+    state.users = state.users.map((item) => (String(item.id) === String(id) ? updated : item));
+    saveState();
+    showToast("Consumer updated");
+    render();
+  } catch (e) {
+    showToast("Failed to update consumer");
+  }
+}
+
+async function handleDeleteConsumer(id) {
+  if (!confirm("Delete this consumer?")) return;
+  const user = state.users.find((u) => String(u.id) === String(id));
+  if (!user) return;
+
+  try {
+    const res = await fetch((window.__API_BASE__ || "") + `/users/${user.id}`, {
+      method: "DELETE",
+      headers: _authHeaders(),
+    });
+    if (!res.ok) throw new Error("Delete failed");
+    state.users = state.users.filter((u) => String(u.id) !== String(id));
+    saveState();
+    showToast("Consumer deleted");
+    render();
+  } catch (e) {
+    showToast("Failed to delete consumer");
+  }
+}
+
 function normalizeState(data) {
   return {
     ...structuredClone(seed),
@@ -61,6 +205,7 @@ function normalizeState(data) {
     bill: { ...structuredClone(seed).bill, ...(data.bill || {}) },
     captures: data.captures || structuredClone(seed).captures,
     readings: data.readings || structuredClone(seed).readings,
+    bills: data.bills || structuredClone(seed).bills,
     users: data.users || structuredClone(seed).users,
     usageHistory: data.usageHistory || structuredClone(seed).usageHistory,
     theme: data.theme || "dark",
@@ -91,10 +236,40 @@ function currentUser() {
 }
 
 function selectedConsumer() {
-  return state.users.find((user) => user.id === state.selectedConsumerId) || state.users.find((user) => user.role === "consumer");
+  return (
+    state.users.find((user) => String(user.id) === String(state.selectedConsumerId)) ||
+    state.users.find((user) => user.role === "consumer") ||
+    state.users[0]
+  );
 }
 
 function readingsFor(consumerId = selectedConsumer().id) {
+  const backendReadings = state.readings.filter(
+    (reading) => reading.user_id !== undefined && String(reading.user_id) === String(consumerId)
+  );
+
+  if (backendReadings.length > 0) {
+    const sorted = [...backendReadings].sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+    const first = sorted[0];
+    const last = sorted[sorted.length - 1];
+    return {
+      first: {
+        id: first.id,
+        consumerId,
+        value: first.reading_value,
+        timestamp: new Date(first.created_at).toLocaleString("en-IN"),
+        confidence: first.ocr_confidence,
+      },
+      last: {
+        id: last.id,
+        consumerId,
+        value: last.reading_value,
+        timestamp: new Date(last.created_at).toLocaleString("en-IN"),
+        confidence: last.ocr_confidence,
+      },
+    };
+  }
+
   const first = state.readings.find((reading) => reading.consumerId === consumerId && reading.type === "first");
   const last = state.readings.find((reading) => reading.consumerId === consumerId && reading.type === "last");
 
@@ -124,8 +299,26 @@ function units(consumerId = selectedConsumer().id) {
   return Math.max(0, Number(last?.value || 0) - Number(first?.value || 0));
 }
 
-function billAmount() {
-  return Math.round(units() * tariffRate + Number(state.bill.gst) + Number(state.bill.fixedCharge) + Number(state.bill.additionalCharge));
+function getLatestBill(consumerId) {
+  const backendBills = (state.bills || []).filter(
+    (bill) => bill.user_id !== undefined && String(bill.user_id) === String(consumerId)
+  );
+  if (!backendBills.length) return null;
+  return backendBills.sort((a, b) => new Date(b.created_at) - new Date(a.created_at))[0];
+}
+
+function currentBill(consumerId) {
+  const latest = getLatestBill(consumerId);
+  if (latest) return latest;
+  return state.bill;
+}
+
+function billAmount(consumerId = selectedConsumer().id) {
+  const bill = currentBill(consumerId);
+  if (bill?.total_amount !== undefined) {
+    return Number(bill.total_amount);
+  }
+  return Math.round(units(consumerId) * tariffRate + Number(bill.gst) + Number(bill.fixedCharge) + Number(bill.additionalCharge));
 }
 
 function currency(value) {
@@ -187,21 +380,22 @@ function login(event) {
       }
       const data = await res.json();
       window.localStorage.setItem("meterx_auth_token", data.access_token);
-      return fetch((window.__API_BASE__ || "") + "/auth/me", {
+      const profileRes = await fetch((window.__API_BASE__ || "") + "/auth/me", {
         headers: { Authorization: `Bearer ${data.access_token}` },
       });
-    })
-    .then(async (res) => {
-      if (!res.ok) {
+      if (!profileRes.ok) {
         throw new Error("Unable to fetch user profile");
       }
-      const user = await res.json();
+      return profileRes.json();
+    })
+    .then(async (user) => {
       if (!state.users.find((item) => item.id === user.id)) {
-        state.users.push({ id: user.id, name: user.name, email: user.email, role: user.role });
+        state.users.push({ id: user.id, name: user.name, email: user.email, role: user.role, consumer_number: user.consumer_number });
       }
       state.currentUserId = user.id;
       state.route = user.role === "admin" ? "admin-dashboard" : "consumer-dashboard";
       if (user.role === "consumer") state.selectedConsumerId = user.id;
+      await refreshBackendData();
       saveState();
       showLoading("Signing in...");
       setTimeout(render, 400);
@@ -237,15 +431,29 @@ function register(event) {
       }
       return res.json();
     })
-    .then((user) => {
-      if (!state.users.find((item) => item.id === user.id)) {
-        state.users.push({ id: user.id, name: user.name, email: user.email, role: user.role });
+    .then(async (user) => {
+      const loginRes = await fetch((window.__API_BASE__ || "") + "/auth/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: payload.email, password: payload.password, role: payload.role }),
+      });
+
+      if (!loginRes.ok) {
+        throw new Error("Login after registration failed");
       }
+
+      const loginData = await loginRes.json();
+      window.localStorage.setItem("meterx_auth_token", loginData.access_token);
+
       state.currentUserId = user.id;
       state.route = user.role === "admin" ? "admin-dashboard" : "consumer-dashboard";
       if (user.role === "consumer") {
         state.selectedConsumerId = user.id;
       }
+      if (!state.users.find((item) => item.id === user.id)) {
+        state.users.push({ id: user.id, name: user.name, email: user.email, role: user.role, consumer_number: user.consumer_number });
+      }
+      await refreshBackendData();
       saveState();
       showLoading("Creating account...");
       setTimeout(render, 450);
@@ -414,13 +622,19 @@ function consumerDashboard() {
 }
 
 function billsView() {
+  const user = currentUser();
+  const activeConsumer = user.role === "admin" ? selectedConsumer() : user;
+  const bills = getConsumerBills(activeConsumer.id);
   return shell(
     "Bills",
     `
       <section class="panel">
-        <div class="panel-header"><div><h3>Monthly Bill PDF Preview</h3><p>PDF structure for your KSEB bill output.</p></div><button class="primary" data-action="download-bill"><i data-lucide="download"></i> Download PDF</button></div>
+        <div class="panel-header"><div><h3>Bill Summary</h3><p>Latest bill details and payment status.</p></div><button class="primary" data-action="download-bill"><i data-lucide="download"></i> Download PDF</button></div>
         ${billRows()}
-        <div class="bill-total"><span>Total Amount</span><strong>${currency(billAmount())}</strong></div>
+      </section>
+      <section class="panel" style="margin-top:18px">
+        <div class="panel-header"><div><h3>${user.role === "admin" ? "Selected Consumer" : "Your"} Bills</h3><p>Recent billing history for ${activeConsumer.name}.</p></div></div>
+        ${bills.length ? bills.map((bill) => billHistoryRow(bill, user.role === "admin")).join("") : `<div class="empty-state">No bills available yet.</div>`}
       </section>
     `
   );
@@ -464,17 +678,22 @@ function predictionView() {
 
 function adminDashboard() {
   const consumers = state.users.filter((user) => user.role === "consumer");
+  const bills = state.bills || [];
+  const pendingBills = bills.filter((bill) => bill.status !== "approved" && bill.status !== "paid").length;
+  const generatedCount = bills.length;
+  const paymentStatus = bills.some((bill) => bill.status === "pending" || bill.status === "draft") ? "Pending" : "Verified";
+
   return shell(
     "All Consumers",
     `
       <div class="grid stats-grid">
         ${stat("Consumers", consumers.length, "Registered consumer accounts")}
-        ${stat("Pending Verification", state.bill.approved ? 0 : 1, "Monthly readings")}
-        ${stat("Bills Generated", state.bill.status === "Generated" ? 1 : 0, "Current cycle")}
-        ${stat("Payment Status", state.bill.paymentStatus, "Receipt verification")}
+        ${stat("Pending Reviews", pendingBills, "Readings awaiting admin verification")}
+        ${stat("Bills Generated", generatedCount, "Current billing cycle")}
+        ${stat("Payment Status", paymentStatus, "Receipt verification")}
       </div>
       <section class="panel" style="margin-top:18px">
-        <div class="panel-header"><div><h3>Consumer List</h3><p>Select a consumer for verification and billing review.</p></div><button class="secondary" data-route="register"><i data-lucide="user-plus"></i> Add User</button></div>
+        <div class="panel-header"><div><h3>Consumer List</h3><p>Select a consumer for verification and billing review.</p></div><button class="secondary" data-action="add-consumer"><i data-lucide="user-plus"></i> Add Consumer</button></div>
         <div class="consumer-list">
           ${consumers.map((user) => consumerRow(user)).join("")}
         </div>
@@ -484,11 +703,15 @@ function adminDashboard() {
 }
 
 function consumerRow(user) {
+  const displayId = user.consumer_number || user.id;
   return `
-    <button class="consumer-row ${state.selectedConsumerId === user.id ? "selected" : ""}" data-consumer="${user.id}">
-      <span><strong>${user.name}</strong><small>${user.id} | ${user.email}</small></span>
-      <span class="status info">${units(user.id)} units</span>
-    </button>
+    <div class="consumer-row-wrapper">
+      <button class="consumer-row ${String(state.selectedConsumerId) === String(user.id) ? "selected" : ""}" data-consumer="${user.id}">
+        <span><strong>${user.name}</strong><small>${displayId} | ${user.email || ""}</small></span>
+        <span class="status info">${units(user.id)} units</span>
+      </button>
+      ${currentUser()?.role === "admin" ? `<div class="consumer-actions"><button class="icon-btn small" data-action="edit-consumer" data-consumer="${user.id}"><i data-lucide="edit-2"></i></button><button class="icon-btn small" data-action="delete-consumer" data-consumer="${user.id}"><i data-lucide="trash-2"></i></button></div>` : ""}
+    </div>
   `;
 }
 
@@ -499,7 +722,7 @@ function verifyView() {
     "Admin Verification Dashboard",
     `
       <section class="panel">
-        <div class="panel-header"><div><h3>${consumer.name}</h3><p>Verify OCR values before bill generation.</p></div><span class="status ${state.bill.approved ? "ok" : "info"}">${state.bill.approved ? "Approved" : "Awaiting approval"}</span></div>
+        <div class="panel-header"><div><h3>${consumer.name}</h3><p>Verify OCR values before bill generation.</p></div><span class="status ${currentBill(consumer.id).status === "approved" ? "ok" : "info"}">${currentBill(consumer.id).status === "approved" ? "Approved" : "Awaiting approval"}</span></div>
         <div class="proof-grid">
           ${proof("First Day Reading Image", first.timestamp, first.value, first.confidence)}
           ${proof("Last Day Reading Image", last.timestamp, last.value, last.confidence)}
@@ -510,8 +733,8 @@ function verifyView() {
           <div class="field"><label>Units Consumed</label><input readonly value="${units(consumer.id)} units" /></div>
         </div>
         <div style="margin-top:16px;display:flex;gap:10px;flex-wrap:wrap">
-          <button class="primary" data-action="approve-readings"><i data-lucide="badge-check"></i> Approve Readings</button>
-          <button class="secondary" data-action="save-readings"><i data-lucide="pencil"></i> Modify Reading</button>
+          <button class="primary" data-action="approve-readings"><i data-lucide="badge-check"></i> Approve Latest Reading</button>
+          <button class="secondary" data-action="save-readings"><i data-lucide="pencil"></i> Save Reading</button>
         </div>
       </section>
     `
@@ -519,6 +742,7 @@ function verifyView() {
 }
 
 function billingView() {
+  const consumer = selectedConsumer();
   return shell(
     "Billing Module",
     `
@@ -531,6 +755,10 @@ function billingView() {
         </div>
         <div style="margin-top:18px">${billRows()}</div>
         <div class="bill-total"><span>Final Bill PDF Amount</span><strong>${currency(billAmount())}</strong></div>
+      </section>
+      <section class="panel" style="margin-top:18px">
+        <div class="panel-header"><div><h3>Billing Preview</h3><p>Selected consumer: ${consumer.name}</p></div></div>
+        ${consumer ? billRows() : `<div class="empty-state">Select a consumer to generate a bill.</div>`}
       </section>
     `
   );
@@ -563,18 +791,36 @@ function meterVisual(reading) {
 
 function billRows() {
   const consumer = selectedConsumer();
+  const bill = currentBill(consumer.id);
   const { first, last } = readingsFor(consumer.id);
   const energy = Math.round(units(consumer.id) * tariffRate);
   return `
     <div class="bill-row"><span>Consumer Name</span><strong>${consumer.name}</strong></div>
-    <div class="bill-row"><span>Consumer ID</span><strong>${consumer.id}</strong></div>
-    <div class="bill-row"><span>Billing Month</span><strong>${state.bill.month}</strong></div>
+    <div class="bill-row"><span>Consumer ID</span><strong>${consumer.consumer_number || consumer.id}</strong></div>
+    <div class="bill-row"><span>Billing Month</span><strong>${bill.month || state.bill.month}</strong></div>
     <div class="bill-row"><span>First Reading</span><strong>${Number(first.value).toLocaleString("en-IN")} kWh</strong></div>
     <div class="bill-row"><span>Last Reading</span><strong>${Number(last.value).toLocaleString("en-IN")} kWh</strong></div>
     <div class="bill-row"><span>Units Consumed</span><strong>${units(consumer.id)} units</strong></div>
     <div class="bill-row"><span>Energy Charge</span><strong>${currency(energy)}</strong></div>
-    <div class="bill-row"><span>GST + Fixed + Additional</span><strong>${currency(Number(state.bill.gst) + Number(state.bill.fixedCharge) + Number(state.bill.additionalCharge))}</strong></div>
-    <div class="bill-row"><span>Payment Status</span><strong>${state.bill.paymentStatus}</strong></div>
+    <div class="bill-row"><span>GST + Fixed + Additional</span><strong>${currency(Number(bill.gst || state.bill.gst) + Number(bill.fixedCharge || state.bill.fixedCharge) + Number(bill.additionalCharge || state.bill.additionalCharge))}</strong></div>
+    <div class="bill-row"><span>Payment Status</span><strong>${bill.status || state.bill.paymentStatus}</strong></div>
+  `;
+}
+
+function getConsumerBills(consumerId) {
+  return (state.bills || []).filter((bill) => String(bill.user_id) === String(consumerId));
+}
+
+function billHistoryRow(bill, showApprove = false) {
+  const statusLabel = bill.status ? bill.status.charAt(0).toUpperCase() + bill.status.slice(1) : "Draft";
+  return `
+    <div class="bill-row history">
+      <div>
+        <strong>${bill.month}</strong>
+        <small>${statusLabel} · ${currency(bill.total_amount)}</small>
+      </div>
+      ${showApprove && bill.status !== "approved" ? `<button class="secondary small" data-action="approve-bill" data-bill="${bill.id}">Approve</button>` : ""}
+    </div>
   `;
 }
 
@@ -635,20 +881,13 @@ function bindEvents() {
 
   document.querySelectorAll("[data-action='toggle-theme']").forEach((button) => button.addEventListener("click", toggleTheme));
   document.querySelector("[data-action='logout']")?.addEventListener("click", logout);
-  document.querySelector("[data-action='approve-readings']")?.addEventListener("click", () => {
-    state.bill.approved = true;
-    saveState();
-    showToast("Readings approved.");
-    render();
-  });
+  document.querySelectorAll("[data-action='add-consumer']").forEach((btn) => btn.addEventListener("click", handleAddConsumer));
+  document.querySelectorAll("[data-action='edit-consumer']").forEach((btn) => btn.addEventListener("click", (e) => handleEditConsumer(e.currentTarget.dataset.consumer)));
+  document.querySelectorAll("[data-action='delete-consumer']").forEach((btn) => btn.addEventListener("click", (e) => handleDeleteConsumer(e.currentTarget.dataset.consumer)));
+  document.querySelector("[data-action='approve-readings']")?.addEventListener("click", approveLatestReading);
   document.querySelector("[data-action='save-readings']")?.addEventListener("click", saveReadings);
-  document.querySelector("[data-action='generate-bill']")?.addEventListener("click", () => {
-    saveCharges();
-    state.bill.status = "Generated";
-    showToast("Monthly bill generated.");
-    saveState();
-    render();
-  });
+  document.querySelector("[data-action='generate-bill']")?.addEventListener("click", handleGenerateBill);
+  document.querySelectorAll("[data-action='approve-bill']").forEach((btn) => btn.addEventListener("click", (e) => approveBill(Number(e.currentTarget.dataset.bill))));
   document.querySelector("[data-action='upload-receipt']")?.addEventListener("click", uploadReceipt);
   document.querySelector("[data-action='mark-paid']")?.addEventListener("click", () => {
     state.bill.paymentStatus = "Verified";
@@ -664,10 +903,37 @@ function bindEvents() {
   ["gst", "fixedCharge", "additionalCharge"].forEach((id) => document.getElementById(id)?.addEventListener("input", saveCharges));
 }
 
-function saveReadings() {
-  const { first, last } = readingsFor();
-  first.value = Number(document.getElementById("firstReading").value);
-  last.value = Number(document.getElementById("lastReading").value);
+async function saveReadings() {
+  const consumer = selectedConsumer();
+  const { last } = readingsFor(consumer.id);
+  const value = Number(document.getElementById("lastReading")?.value);
+  if (!value) {
+    showToast("Enter a valid reading value.");
+    return;
+  }
+
+  if (currentUser()?.role === "admin") {
+    const token = window.localStorage.getItem("meterx_auth_token");
+    if (token) {
+      try {
+        const res = await fetch((window.__API_BASE__ || "") + "/admin/modify-reading", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", ..._authHeaders() },
+          body: JSON.stringify({ reading_id: last.id, reading_value: value, verification_note: "Adjusted by admin" }),
+        });
+        if (res.ok) {
+          await refreshBackendData();
+          showToast("Reading updated on backend.");
+          render();
+          return;
+        }
+      } catch (e) {
+        // fallback to local state
+      }
+    }
+  }
+
+  last.value = value;
   saveState();
   showToast("OCR readings updated.");
   render();
@@ -722,7 +988,7 @@ function simulateOcr() {
   }, 1100);
 }
 
-function saveScanReading() {
+async function saveScanReading() {
   const user = currentUser();
   const { last } = readingsFor(user.id);
   const value = Number(document.getElementById("scanReading")?.value);
@@ -730,6 +996,27 @@ function saveScanReading() {
     showToast("Enter or extract a valid meter reading.");
     return;
   }
+
+  if (user.role === "consumer") {
+    try {
+      const res = await fetch((window.__API_BASE__ || "") + "/readings", {
+        method: "POST",
+        headers: _authHeaders(),
+        body: JSON.stringify({ reading_value: value, ocr_confidence: 98.4 }),
+      });
+      if (res.ok) {
+        await refreshBackendData();
+        state.bill.status = "Pending Verification";
+        saveState();
+        showToast("Meter reading saved to backend.");
+        render();
+        return;
+      }
+    } catch (e) {
+      // fallback to local state
+    }
+  }
+
   last.value = value;
   last.timestamp = new Date().toLocaleString("en-IN");
   last.confidence = 98.4;
@@ -738,6 +1025,79 @@ function saveScanReading() {
   saveState();
   showToast("Meter photo reading saved for admin verification.");
   render();
+}
+
+async function handleGenerateBill() {
+  const consumer = selectedConsumer();
+  saveCharges();
+  try {
+    const res = await fetch((window.__API_BASE__ || "") + "/bills/generate", {
+      method: "POST",
+      headers: _authHeaders(),
+      body: JSON.stringify({
+        user_id: consumer.id,
+        month: state.bill.month,
+        gst: state.bill.gst,
+        fixed_charge: state.bill.fixedCharge,
+        additional_charge: state.bill.additionalCharge,
+      }),
+    });
+
+    if (!res.ok) {
+      throw new Error("Bill generation failed");
+    }
+
+    const bill = await res.json();
+    state.bills = [bill, ...(state.bills || [])];
+    state.bill.status = bill.status || "generated";
+    saveState();
+    showToast("Bill generated successfully.");
+    render();
+  } catch (e) {
+    showToast("Failed to generate bill.");
+  }
+}
+
+async function approveLatestReading() {
+  const consumer = selectedConsumer();
+  const { last } = readingsFor(consumer.id);
+  if (!last?.id) {
+    showToast("No valid reading available to approve.");
+    return;
+  }
+
+  try {
+    const res = await fetch((window.__API_BASE__ || "") + "/admin/approve-reading", {
+      method: "POST",
+      headers: _authHeaders(),
+      body: JSON.stringify({ reading_id: last.id, verification_note: "Approved by admin" }),
+    });
+    if (!res.ok) {
+      throw new Error("Approval failed");
+    }
+    await refreshBackendData();
+    showToast("Reading approved.");
+    render();
+  } catch (e) {
+    showToast("Failed to approve reading.");
+  }
+}
+
+async function approveBill(billId) {
+  try {
+    const res = await fetch((window.__API_BASE__ || "") + `/bills/${billId}/approve`, {
+      method: "POST",
+      headers: _authHeaders(),
+    });
+    if (!res.ok) {
+      throw new Error("Approve bill failed");
+    }
+    await refreshBackendData();
+    showToast("Bill approved successfully.");
+    render();
+  } catch (e) {
+    showToast("Failed to approve bill.");
+  }
 }
 
 function downloadBillPdf() {
@@ -749,6 +1109,7 @@ function downloadBillPdf() {
   }
 
   const consumer = selectedConsumer();
+  const bill = currentBill(consumer.id);
   const { first, last } = readingsFor(consumer.id);
   const energy = Math.round(units(consumer.id) * tariffRate);
   const doc = new jsPdf();
@@ -760,17 +1121,17 @@ function downloadBillPdf() {
 
   const rows = [
     ["Consumer Name", consumer.name],
-    ["Consumer ID", consumer.id],
-    ["Billing Month", state.bill.month],
+    ["Consumer ID", consumer.consumer_number || consumer.id],
+    ["Billing Month", bill.month || state.bill.month],
     ["First Reading", `${first.value} kWh`],
     ["Last Reading", `${last.value} kWh`],
     ["Units Consumed", `${units(consumer.id)} units`],
     ["Energy Charge", currency(energy)],
-    ["GST", currency(state.bill.gst)],
-    ["Fixed Charges", currency(state.bill.fixedCharge)],
-    ["Additional Charges", currency(state.bill.additionalCharge)],
-    ["Total Amount", currency(billAmount())],
-    ["Payment Status", state.bill.paymentStatus],
+    ["GST", currency(bill.gst || state.bill.gst)],
+    ["Fixed Charges", currency(bill.fixedCharge || state.bill.fixedCharge)],
+    ["Additional Charges", currency(bill.additionalCharge || state.bill.additionalCharge)],
+    ["Total Amount", currency(billAmount(consumer.id))],
+    ["Payment Status", bill.status || state.bill.paymentStatus],
   ];
 
   rows.forEach(([label, value], index) => {
@@ -877,5 +1238,6 @@ window.resetMeterXDemo = resetDemo;
 // initialize app: load state (from backend or local) then render
 (async function init() {
   state = await loadState();
+  await refreshBackendData();
   render();
 })();

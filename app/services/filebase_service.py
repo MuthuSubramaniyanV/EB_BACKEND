@@ -43,3 +43,11 @@ class FilebaseService:
         if settings.FILEBASE_PUBLIC_BASE_URL:
             return f"{settings.FILEBASE_PUBLIC_BASE_URL.rstrip('/')}/{file_name}"
         return f"{self.endpoint.rstrip('/')}/{self.bucket}/{file_name}"
+
+    def get_image_bytes(self, file_name: str) -> bytes:
+        """Download an object from the configured Filebase bucket and return its bytes."""
+        try:
+            obj = self.s3.get_object(Bucket=self.bucket, Key=file_name)
+            return obj["Body"].read()
+        except ClientError as exc:
+            raise RuntimeError(f"Failed to get file {file_name}: {exc}") from exc
