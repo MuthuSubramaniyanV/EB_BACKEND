@@ -97,7 +97,26 @@ function selectedConsumer() {
 function readingsFor(consumerId = selectedConsumer().id) {
   const first = state.readings.find((reading) => reading.consumerId === consumerId && reading.type === "first");
   const last = state.readings.find((reading) => reading.consumerId === consumerId && reading.type === "last");
-  return { first, last };
+
+  const defaultFirst = {
+    consumerId,
+    type: "first",
+    value: 10000,
+    timestamp: new Date().toLocaleString("en-IN"),
+    confidence: 90,
+  };
+  const defaultLast = {
+    consumerId,
+    type: "last",
+    value: first ? Number(first.value) + 150 : 10150,
+    timestamp: new Date().toLocaleString("en-IN"),
+    confidence: 92,
+  };
+
+  return {
+    first: first || defaultFirst,
+    last: last || defaultLast,
+  };
 }
 
 function units(consumerId = selectedConsumer().id) {
