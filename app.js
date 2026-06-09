@@ -57,7 +57,7 @@ async function loadState() {
 
 function _authHeaders() {
   const token = window.localStorage.getItem("meterx_auth_token");
-  const headers = { "Content-Type": "application/json" };
+  const headers = {};
   if (token) headers.Authorization = `Bearer ${token}`;
   return headers;
 }
@@ -595,7 +595,7 @@ function consumerDashboard() {
             <div class="scan-preview" id="scanPreview"><i data-lucide="camera"></i><strong>Tap to scan meter</strong><span>Use phone camera or upload image</span></div>
           </label>
           <div class="form-grid" style="margin-top:14px">
-            <div class="field"><label>Extracted Reading</label><input id="scanReading" type="number" value="${last.value}" /></div>
+            <div class="field"><label>Extracted Reading</label><input id="scanReading" type="number" readonly value="${last.value}" data-uploadid="" /></div>
             <div class="field"><label>OCR Confidence</label><input id="scanConfidence" readonly value="98.4%" /></div>
             <div class="field"><label>Timestamp</label><input readonly value="${new Date().toLocaleString("en-IN")}" /></div>
           </div>
@@ -973,36 +973,72 @@ function previewMeterPhoto(event) {
   reader.readAsDataURL(file);
 }
 
-function simulateOcr() {
+async function simulateOcr() {
+  const fileInput = document.getElementById("meterPhoto");
+  const file = fileInput?.files?.[0];
+  const preview = document.getElementById("scanPreview");
   const input = document.getElementById("scanReading");
   const confidence = document.getElementById("scanConfidence");
-  const current = Number(input.value || readingsFor(currentUser().id).last.value);
-  const preview = document.getElementById("scanPreview");
+
+  if (!file) {
+    showToast("Choose a meter photo before extracting reading.");
+    return;
+  }
+
+  const formData = new FormData();
+  formData.append("file", file);
+
   preview?.classList.add("scanning");
   showLoading("Running OCR scan...");
-  setTimeout(() => {
-    input.value = (current + Math.round(Math.random() * 8 + 2)).toFixed(1);
-    if (confidence) confidence.value = `${(96 + Math.random() * 3).toFixed(1)}%`;
+
+  try {
+    const res = await fetch((window.__API_BASE__ || "") + "/ocr/scan", {
+      method: "POST",
+      headers: _authHeaders(),
+      body: formData,
+    });
+
+    if (!res.ok) {
+      throw new Error("OCR scan failed");
+    }
+
+    const data = await res.json();
+    input.value = Number(data.reading).toFixed(1);
+    if (confidence) {
+      confidence.value = `${(Number(data.confidence) * 100).toFixed(1)}%`;
+    }
+    input.dataset.uploadid = data.upload_id || "";
     preview?.classList.remove("scanning");
     showToast("OCR extraction completed.");
-  }, 1100);
+  } catch (error) {
+    preview?.classList.remove("scanning");
+    showToast("Failed to extract reading from the image.");
+  }
 }
 
 async function saveScanReading() {
   const user = currentUser();
   const { last } = readingsFor(user.id);
-  const value = Number(document.getElementById("scanReading")?.value);
+  const input = document.getElementById("scanReading");
+  const confidence = document.getElementById("scanConfidence");
+  const value = Number(input?.value);
+  const uploadId = Number(input?.dataset.uploadid) || undefined;
+  const ocrValue = Number((confidence?.value || "").replace("%", "")) / 100 || 0.0;
+
   if (!value) {
-    showToast("Enter or extract a valid meter reading.");
+    showToast("Extract a valid meter reading before saving.");
     return;
   }
 
   if (user.role === "consumer") {
     try {
+      const payload = { reading_value: value, ocr_confidence: ocrValue };
+      if (uploadId) payload.upload_id = uploadId;
+
       const res = await fetch((window.__API_BASE__ || "") + "/readings", {
         method: "POST",
-        headers: _authHeaders(),
-        body: JSON.stringify({ reading_value: value, ocr_confidence: 98.4 }),
+        headers: { "Content-Type": "application/json", ..._authHeaders() },
+        body: JSON.stringify(payload),
       });
       if (res.ok) {
         await refreshBackendData();

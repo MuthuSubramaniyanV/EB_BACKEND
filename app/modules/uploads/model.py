@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 
 class MeterUpload(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="users.id")
     file_name: str
     image_url: str
     timestamp: datetime

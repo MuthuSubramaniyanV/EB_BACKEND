@@ -19,6 +19,7 @@ from app.modules.anomalies.route import router as anomaly_router
 from app.modules.ocr.route import router as ocr_router
 from app.modules.admin.route import router as admin_router
 from app.modules.state.route import router as state_router
+from app.modules.meter.route import router as meter_router
 from app.modules.users.model import User
 from app.modules.readings.model import MeterReading
 from app.modules.billing.model import Bill
@@ -170,6 +171,7 @@ app.include_router(prediction_router, tags=["Predictions"])
 app.include_router(anomaly_router, tags=["Anomalies"])
 
 app.include_router(ocr_router, tags=["OCR"])
+app.include_router(meter_router, tags=["Meter"])
 
 app.include_router(admin_router, tags=["Admin"])
 

@@ -24,6 +24,7 @@ def create_db_and_tables():
         raise RuntimeError("Database engine not initialized")
     SQLModel.metadata.create_all(engine)
     _ensure_users_app_state_column()
+    _ensure_uploads_user_id_column()
 
 
 def _ensure_users_app_state_column():
@@ -36,6 +37,19 @@ def _ensure_users_app_state_column():
         with engine.begin() as conn:
             conn.execute(
                 text("ALTER TABLE users ADD COLUMN app_state TEXT")
+            )
+
+
+def _ensure_uploads_user_id_column():
+    inspector = inspect(engine)
+    if "meterupload" not in inspector.get_table_names():
+        return
+
+    existing_columns = {col["name"] for col in inspector.get_columns("meterupload")}
+    if "user_id" not in existing_columns:
+        with engine.begin() as conn:
+            conn.execute(
+                text("ALTER TABLE meterupload ADD COLUMN user_id INTEGER")
             )
 
 

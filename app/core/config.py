@@ -31,5 +31,7 @@ class Settings:
     FILEBASE_BUCKET = env("FILEBASE_BUCKET")
     FILEBASE_PUBLIC_BASE_URL = env("FILEBASE_PUBLIC_BASE_URL")
 
+    ESP32_CAMERA_URL = env("ESP32_CAMERA_URL")
+
 
 settings = Settings()

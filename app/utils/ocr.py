@@ -40,7 +40,7 @@ def _extract_longest_number(text: str) -> Optional[str]:
 def perform_ocr_bytes(content: bytes, filename: str = "image.jpg") -> dict:
     """Perform OCR on raw image bytes and return reading and optional confidence.
 
-    Uses pytesseract + simple preprocessing. Returns dict: {"reading": float, "confidence": float}
+    Uses pytesseract + enhanced preprocessing. Returns dict: {"reading": float, "confidence": float}
     """
     if Image is None:
         raise RuntimeError("OCR dependencies not installed. Install pillow, opencv-python-headless, pytesseract, numpy.")
@@ -48,83 +48,132 @@ def perform_ocr_bytes(content: bytes, filename: str = "image.jpg") -> dict:
     pil = Image.open(io.BytesIO(content)).convert("RGB")
     img = cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2BGR)
 
-    # Preprocess: grayscale, resize, denoise
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     h, w = gray.shape
-    scale = max(1, int(800 / max(w, h)))
+    scale = max(1, int(1200 / max(w, h)))
     if scale > 1:
         gray = cv2.resize(gray, (w * scale, h * scale), interpolation=cv2.INTER_LINEAR)
 
     gray = cv2.bilateralFilter(gray, 9, 75, 75)
-    # adaptive threshold to highlight digits
-    thresh = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 15, 9)
+    gray = cv2.equalizeHist(gray)
 
-    # try to find large rectangular contours that might be the meter display
+    def _normalize_text(text: str) -> str:
+        return (
+            text.replace("O", "0")
+            .replace("o", "0")
+            .replace("I", "1")
+            .replace("l", "1")
+            .replace("S", "5")
+            .replace("s", "5")
+            .replace("|", "1")
+            .replace("", "")
+        )
+
+    def _parse_candidate(raw_text: str, data: dict) -> tuple[Optional[float], float]:
+        raw_text = _normalize_text(raw_text)
+        cand = _extract_longest_number(raw_text)
+        if not cand:
+            return None, 0.0
+
+        confs = []
+        for i, txt in enumerate(data.get("text", [])):
+            if txt and re.search(r"\d", txt):
+                try:
+                    conf = float(data.get("conf", [])[i])
+                    if conf > 0:
+                        confs.append(conf)
+                except Exception:
+                    continue
+
+        mean_conf = (sum(confs) / len(confs) / 100.0) if confs else 0.0
+        val = cand.replace(",", "").replace(" ", "")
+        try:
+            return float(val), mean_conf
+        except Exception:
+            return None, 0.0
+
+    def _ocr_image(image, config):
+        if isinstance(image, Image.Image):
+            pil_img = image
+        else:
+            pil_img = Image.fromarray(image)
+
+        raw_text = pytesseract.image_to_string(
+            pil_img,
+            config=config
+        )
+
+        print("\n========================")
+        print("OCR CONFIG:", config)
+        print("RAW OCR TEXT:", repr(raw_text))
+        print("========================\n")
+
+        data = pytesseract.image_to_data(
+            pil_img,
+            output_type=Output.DICT,
+            config=config
+        )
+
+        return _parse_candidate(raw_text, data)
+
+    ocr_configs = [
+        "--psm 7 -c tessedit_char_whitelist=0123456789,.",
+        "--psm 6 -c tessedit_char_whitelist=0123456789,.",
+        "--psm 8 -c tessedit_char_whitelist=0123456789,."
+    ]
+
+    best_reading = None
+    best_conf = 0.0
+
+    thresh = cv2.adaptiveThreshold(
+        gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 15, 9
+    )
     contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
     candidates = []
     for cnt in contours:
         x, y, cw, ch = cv2.boundingRect(cnt)
         area = cw * ch
-        if area < 500:  # skip small
+        if area < 1500:
             continue
         ar = cw / float(ch + 1)
-        if ar > 2.0:  # likely a wide display
+        if ar > 1.5:
             candidates.append((area, x, y, cw, ch))
 
     crops = []
-    # sort by area desc
     for _, x, y, cw, ch in sorted(candidates, key=lambda t: t[0], reverse=True):
-        pad = 5
+        pad = 10
         sx = max(0, x - pad)
         sy = max(0, y - pad)
         ex = min(gray.shape[1], x + cw + pad)
         ey = min(gray.shape[0], y + ch + pad)
         crop = gray[sy:ey, sx:ex]
-        crops.append(crop)
+        if crop.size > 0:
+            crops.append(crop)
 
-    # always also try the full image
     crops.append(gray)
 
-    best_reading = None
-    best_conf = 0.0
+    for crop in crops:
+        crop = cv2.resize(crop, None, fx=2, fy=2, interpolation=cv2.INTER_LINEAR)
+        crop = cv2.GaussianBlur(crop, (3, 3), 0)
 
-    ocr_config = "--psm 7 -c tessedit_char_whitelist=0123456789,."
-    for c in crops:
-        # increase contrast
-        c = cv2.resize(c, None, fx=2, fy=2, interpolation=cv2.INTER_LINEAR)
-        c = cv2.GaussianBlur(c, (3, 3), 0)
-        _, c = cv2.threshold(c, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        pil_img = Image.fromarray(c)
+        for thresh_mode in [cv2.THRESH_BINARY + cv2.THRESH_OTSU, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU]:
+            _, processed = cv2.threshold(crop, 0, 255, thresh_mode)
+            for config in ocr_configs:
+                reading_val, mean_conf = _ocr_image(processed, config)
+                if reading_val is not None:
+                    if best_reading is None or mean_conf > best_conf or (mean_conf == best_conf and reading_val > best_reading):
+                        best_conf = mean_conf
+                        best_reading = reading_val
 
-        # get OCR text and detailed data
-        raw_text = pytesseract.image_to_string(pil_img, config=ocr_config)
-        data = pytesseract.image_to_data(pil_img, output_type=Output.DICT, config=ocr_config)
-
-        cand = _extract_longest_number(raw_text)
-        if cand:
-            # compute mean confidence for numeric words
-            confs = []
-            for i, txt in enumerate(data.get('text', [])):
-                if txt and re.search(r"\d", txt):
-                    try:
-                        conf = float(data.get('conf', [])[i])
-                        if conf > 0:
-                            confs.append(conf)
-                    except Exception:
-                        continue
-            mean_conf = (sum(confs) / len(confs) / 100.0) if confs else 0.0
-            # normalize cand
-            val = cand.replace(',', '').replace(' ', '')
-            try:
-                reading_val = float(val)
-            except Exception:
-                continue
-            if mean_conf > best_conf or best_reading is None:
+    if best_reading is None or best_reading == 0.0:
+        for config in ocr_configs:
+            reading_val, mean_conf = _ocr_image(gray, config)
+            if reading_val is not None and (best_reading is None or mean_conf > best_conf):
                 best_conf = mean_conf
                 best_reading = reading_val
 
     if best_reading is None:
-        # fallback: try digits in filename
         digits = re.findall(r"\d+", filename)
         if digits:
             best_reading = float(digits[-1])
